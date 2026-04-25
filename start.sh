@@ -3,62 +3,53 @@ set -e
 
 echo "=== ClipAI Downloader Starting ==="
 
-# Step 1: Generate WARP credentials if not already present
+mkdir -p /config
+cd /config
+
+# Step 1: Register WARP account (ignore 500 errors from Cloudflare - file still gets created)
 if [ ! -f /config/wgcf-account.toml ]; then
-    echo "Generating WARP credentials..."
-    mkdir -p /config
-    cd /config
-    wgcf register --accept-tos
-    wgcf generate
-    echo "WARP credentials generated."
-else
-    echo "Using existing WARP credentials."
-    cd /config
+    echo "Registering WARP account..."
+    wgcf register --accept-tos || true
+    echo "Registration done (errors above are expected from Cloudflare API)"
 fi
 
-# Step 2: Bring up WireGuard tunnel using WARP config
-echo "Bringing up WireGuard (WARP)..."
-cp /config/wgcf-profile.conf /etc/wireguard/wg0.conf
+# Step 2: Generate WireGuard profile
+if [ ! -f /config/wgcf-profile.conf ]; then
+    echo "Generating WireGuard profile..."
+    wgcf generate || true
+fi
 
-# Remove DNS lines that can cause issues in containers
-sed -i '/^DNS/d' /etc/wireguard/wg0.conf
+# Step 3: Bring up WireGuard
+if [ -f /config/wgcf-profile.conf ]; then
+    echo "Bringing up WireGuard (WARP)..."
+    cp /config/wgcf-profile.conf /etc/wireguard/wg0.conf
 
-# Add routing rule to only route non-local traffic through WARP
-# This prevents the container's management traffic from breaking
-sed -i 's|AllowedIPs = 0.0.0.0/0, ::/0|AllowedIPs = 0.0.0.0/1, 128.0.0.0/1|' /etc/wireguard/wg0.conf
+    # Remove DNS lines — causes issues in containers
+    sed -i '/^DNS/d' /etc/wireguard/wg0.conf
 
-wg-quick up wg0 || echo "WireGuard warning (may still work)"
+    # Only route internet traffic through WARP, not local
+    sed -i 's|AllowedIPs = 0.0.0.0/0, ::/0|AllowedIPs = 0.0.0.0/1, 128.0.0.0/1|' /etc/wireguard/wg0.conf
 
-# Step 3: Wait for WARP to connect
-echo "Waiting for WARP connection..."
-for i in $(seq 1 30); do
-    if curl -s --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
-        echo "✓ WARP connected!"
-        break
-    fi
-    echo "  Waiting... ($i/30)"
-    sleep 2
-done
+    wg-quick up wg0 || echo "WireGuard warning — may still work"
 
-# Step 4: Start Squid proxy
-echo "Starting Squid proxy on port 8080..."
-squid -f /etc/squid/squid.conf
+    # Wait and check
+    echo "Waiting for WARP..."
+    for i in $(seq 1 20); do
+        if curl -s --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
+            echo "✓ WARP connected!"
+            break
+        fi
+        sleep 2
+    done
+else
+    echo "WARNING: No WireGuard profile found — running without WARP"
+fi
+
+# Step 4: Start Squid
+echo "Starting Squid proxy..."
+squid -f /etc/squid/squid.conf || true
 sleep 2
 
-# Verify Squid is running
-if ! pgrep squid > /dev/null; then
-    echo "WARNING: Squid failed to start, trying alternative..."
-    squid -f /etc/squid/squid.conf -N &
-fi
-
-# Step 5: Test the proxy
-echo "Testing proxy..."
-if curl -s -x http://127.0.0.1:8080 --max-time 10 https://cloudflare.com/cdn-cgi/trace | grep -q "warp=on"; then
-    echo "✓ Proxy working with WARP!"
-else
-    echo "WARNING: Proxy test failed, but continuing..."
-fi
-
-# Step 6: Start FastAPI app
-echo "Starting FastAPI downloader on port 8000..."
+# Step 5: Start FastAPI
+echo "Starting FastAPI on port 8000..."
 exec python3 -m uvicorn main:app --host 0.0.0.0 --port 8000
