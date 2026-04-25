@@ -12,9 +12,6 @@ primary_region = 'lhr'
 [env]
   PORT = '8000'
 
-[[mounts]]
-  source = 'warp_config'
-  destination = '/config'
 
 [http_service]
   internal_port = 8080
