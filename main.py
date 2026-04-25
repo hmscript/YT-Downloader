@@ -1,6 +1,6 @@
 """
 ClipAI Downloader Service
-FastAPI app that downloads YouTube videos using Fly.io's IP
+FastAPI app that downloads YouTube videos using bgutil PO token provider
 """
 
 import os
@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-app = FastAPI(title="ClipAI Downloader", version="1.0.0")
+app = FastAPI(title="ClipAI Downloader", version="2.0.0")
 
 DOWNLOAD_DIR = "/tmp/downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -40,7 +40,21 @@ def health():
         ytdlp_version = result.stdout.strip()
     except Exception:
         ytdlp_version = "unknown"
-    return {"status": "ok", "yt_dlp_version": ytdlp_version}
+
+    # Check if bgutil server is running on port 4416
+    bgutil_running = False
+    try:
+        import urllib.request
+        urllib.request.urlopen("http://127.0.0.1:4416", timeout=2)
+        bgutil_running = True
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "yt_dlp_version": ytdlp_version,
+        "pot_provider": bgutil_running,
+    }
 
 
 @app.post("/download")
@@ -52,6 +66,8 @@ async def download_video(req: DownloadRequest, background_tasks: BackgroundTasks
         raise HTTPException(status_code=400, detail="Invalid URL")
 
     with tempfile.TemporaryDirectory(dir=DOWNLOAD_DIR) as tmp:
+        # Use web client with bgutil PO token provider (auto-injected via plugin)
+        # Falls back to android if web fails
         cmd = [
             "yt-dlp",
             "--format", (
@@ -66,13 +82,21 @@ async def download_video(req: DownloadRequest, background_tasks: BackgroundTasks
             "--retries", "10",
             "--fragment-retries", "20",
             "--http-chunk-size", "10M",
-            "--extractor-args", "youtube:player_client=android",
+            "--concurrent-fragments", "4",
+            # Try web first (PO token plugin will auto-provide token)
+            # then android as fallback
+            "--extractor-args", "youtube:player_client=web,android",
             "--output", os.path.join(tmp, "%(title).60s.%(ext)s"),
             req.url
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=1200
+            )
         except subprocess.TimeoutExpired:
             raise HTTPException(status_code=504, detail="Download timed out")
 
