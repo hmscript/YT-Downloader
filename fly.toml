@@ -1,5 +1,5 @@
 # fly.toml - ClipAI Downloader Service
-app = "clipai-downloader"
+app = "yt-downloader-t3w4ug"
 primary_region = "lhr"  # London - closest to Railway's EU servers
 
 [build]
