@@ -6,6 +6,7 @@ FastAPI app that downloads YouTube videos using bgutil PO token provider
 import os
 import tempfile
 import subprocess
+import socket
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
@@ -32,6 +33,22 @@ def cleanup_file(path: str):
         pass
 
 
+def is_bgutil_running() -> bool:
+    """Check if bgutil server is running on port 4416 (IPv4 or IPv6)."""
+    for host in ["127.0.0.1", "::1", "0.0.0.0"]:
+        try:
+            family = socket.AF_INET6 if ":" in host else socket.AF_INET
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            result = sock.connect_ex((host, 4416))
+            sock.close()
+            if result == 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 @app.get("/health")
 def health():
     try:
@@ -41,19 +58,12 @@ def health():
     except Exception:
         ytdlp_version = "unknown"
 
-    # Check if bgutil server is running on port 4416
-    bgutil_running = False
-    try:
-        import urllib.request
-        urllib.request.urlopen("http://127.0.0.1:4416", timeout=2)
-        bgutil_running = True
-    except Exception:
-        pass
+    bgutil = is_bgutil_running()
 
     return {
         "status": "ok",
         "yt_dlp_version": ytdlp_version,
-        "pot_provider": bgutil_running,
+        "pot_provider": bgutil,
     }
 
 
@@ -66,8 +76,6 @@ async def download_video(req: DownloadRequest, background_tasks: BackgroundTasks
         raise HTTPException(status_code=400, detail="Invalid URL")
 
     with tempfile.TemporaryDirectory(dir=DOWNLOAD_DIR) as tmp:
-        # Use web client with bgutil PO token provider (auto-injected via plugin)
-        # Falls back to android if web fails
         cmd = [
             "yt-dlp",
             "--format", (
@@ -83,8 +91,6 @@ async def download_video(req: DownloadRequest, background_tasks: BackgroundTasks
             "--fragment-retries", "20",
             "--http-chunk-size", "10M",
             "--concurrent-fragments", "4",
-            # Try web first (PO token plugin will auto-provide token)
-            # then android as fallback
             "--extractor-args", "youtube:player_client=web,android",
             "--output", os.path.join(tmp, "%(title).60s.%(ext)s"),
             req.url
